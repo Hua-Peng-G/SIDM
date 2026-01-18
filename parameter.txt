@@ -1,0 +1,23 @@
+Rs = 2.6   
+# the NFW parameter (unit:kpc)
+
+M = 6.3e9   
+# the halo mass within 10Rs (unit:solar mass)
+
+sigma0 = 5.0   
+# the (per mass) cross-section of SIDM (unit:cm^2/g)
+
+a = 2.26    
+# constant from transport theory
+
+b = 1.38    
+# constant from transport theory
+
+C = 0.75    
+# calibration parameter for heat conduction
+
+gm = 1.6777777    
+# adiabatic index for the EoS. For non-relativistic ideal gas, gm=5/3
+
+ephib = 1.0   
+# boundary condition for e^phi. Usually set to be 1.

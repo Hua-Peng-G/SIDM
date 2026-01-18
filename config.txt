@@ -1,0 +1,38 @@
+dt_t0 = 1e-4    
+# Time step in units of t0. CAUTION: Large values may cause numerical instability.
+
+N = 1001    
+# Number of spatial grid points.
+
+total_steps = 1000000   
+# Total number of time steps to simulate.
+
+save_interval = 10000    
+# Interval (in steps) for saving output data and updating the live plot.
+
+freeze_radius = 999    
+# Radii (in units of Rs) beyond this value are frozen. Typically set larger than the simulation boundary.
+
+FLAG_HSE = False    
+# Enable hydrostatic equilibrium (quasi-static) approximation. Default: False.
+
+FLAG_P_FAC = False    
+# Enable pressure modification factor. Default: False.
+
+FLAG_HEAT = True    
+# Enable heat conduction. To relax a non-equilibrium initial state (if needed), disable this flag and evolve the system for a while. Default: True.
+
+ENABLE_PLOTTING = True    
+# Enable live plotting. Disable this to maximize simulation speed.
+
+plot_x = Rt    
+# Variable for the x-axis. Typically set to 'Rt' (radius).
+
+plot_y = rhot    
+# Variable for the y-axis. Options: rhot (density), ept (specific internal energy), qt (heat flux), etc.
+
+plot_log_y = True   
+# Use logarithmic scale for the y-axis. Valid only when y values are positive.
+
+filename = output.npy    
+# Name of the output file.
