@@ -1,94 +1,86 @@
-SIDM Halo Collapse Simulation in GR + hydrodynamical
-Author: Hua-peng Gu
-Date: January 2026
+# SIDM Halo Collapse Simulation in GR + Hydrodynamical
 
-========================================================================
-1. OVERVIEW
-========================================================================
+**Author:** Hua-peng Gu  
+**Date:** January 2026
 
-This program simulates the collapse of Self-Interacting Dark Matter (SIDM) 
-halos under General Relativistic (GR) and hydrodynamical conditions. It 
-combines the Misner-Sharp equations with a heat conduction model for SIDM. 
+## 1. Overview
 
-The theoretical foundation and numerical framework for this method is 
-illustrated in: Gu, Jiang, and Chen (2026).
+This program simulates the collapse of Self-Interacting Dark Matter (SIDM) halos under General Relativistic (GR) and hydrodynamical conditions. It combines the Misner-Sharp equations with a heat conduction model for SIDM.
 
-CITATION REQUIREMENT:
-If you use this code or method in your research, please cite our paper:
-Gu, Jiang, and Chen (2026).
-Link: https://......
+The theoretical foundation and numerical framework for this method are illustrated in: **Gu, Jiang, and Chen (2026)**.
 
-========================================================================
-2. QUICK START
-========================================================================
+> [!IMPORTANT]
+> **CITATION REQUIREMENT**
+> If you use this code or method in your research, please cite our paper:  
+> **Gu, Jiang, and Chen (2026).**
+> Link: [Insert Link Here]
 
-To start the simulation with the default NFW profile, simply run the 
-following command:
+---
+
+## 2. Quick Start
+
+To start the simulation with the default NFW profile, simply run the following command:
 
     python main.py
 
-The program will visualize the density profile evolution in real-time. 
-Simulation results will be automatically saved to 'output.npy'.
+The program will visualize the density profile evolution in real-time. Simulation results will be automatically saved to `output.npy`.
 
-========================================================================
-3. CONFIGURATION AND INPUTS
-========================================================================
+---
+
+## 3. Configuration and Inputs
 
 You can customize the simulation by modifying the following text files:
 
-  - parameter.txt: Contains physical parameters (e.g., Rs, M, sigma).
-  - config.txt:    Contains runtime controls (e.g., dt, steps).
+- `parameter.txt`: Contains physical parameters (e.g., $R_s$, $M$, $\sigma$).
+- `config.txt`: Contains runtime controls (e.g., `dt`, `steps`).
 
-Input Data Files:
------------------
+### Input Data Files
 The program requires two initial data files (provided by default):
 
-  1. A.npy: 
-     The Lagrangian grid coordinates.
+1. **`A.npy`**
+   The Lagrangian grid coordinates.
 
-  2. initial.npy: 
-     A (11 x 1001) array containing the initial values of the physical 
-     quantities on 1001 spatial grids. 
-     
-     The 11 channels correspond to: 
-     U, R, rho, epsilon, P, w, e^phi, m, Gamma, eA, q
-
+2. **`initial.npy`**
+   A `(11 x 1001)` array containing the initial values of the physical quantities on 1001 spatial grids.  
+   The 11 channels correspond to:  
+   `U`, `R`, `rho`, `epsilon`, `P`, `w`, `e^phi`, `m`, `Gamma`, `eA`, `q`
+   
 You may replace these files with custom profiles of your interest.
 
-========================================================================
-4. OUTPUT DATA
-========================================================================
+---
 
-The results are saved in 'output.npy'. 
+## 4. Output Data
 
-Data Shape: (N, 11, 1001)
-  - N = (total_steps / save_interval) + 1
-  - The second dimension (11) corresponds to the variables listed above.
-  - The third dimension (1001) corresponds to the spatial grids.
+The results are saved in `output.npy`.
 
-========================================================================
-5. UNITS AND SCALING
-========================================================================
+* **Data Shape:** `(N, 11, 1001)`
+    * `N = (total_steps / save_interval) + 1`
+    * The second dimension (`11`) corresponds to the variables listed above.
+    * The third dimension (`1001`) corresponds to the spatial grids.
+
+---
+
+## 5. Units and Scaling
 
 The code operates in natural units using the following scaling factors:
 
-  Scale_R     = Rs / (GM/c^2)
-  Scale_sigma = M / (GM/c^2)^2
+$$R_{scale} = \frac{R_s}{GM/c^2}$$
 
-Units for Input/Output Variables:
----------------------------------
+$$\sigma_{scale} = \frac{M}{(GM/c^2)^2}$$
 
-  Variable       Unit
-  --------       ----
-  U              Scale_R * c
-  R              Rs
-  rho            rho_s / 18.7
-  epsilon        Scale_R * c^2
-  P              (rho_s / 18.7) * Scale_R * c^2
-  w              1 (Dimensionless)
-  e^phi          1 (Dimensionless)
-  m              M (Halo Mass)
-  Gamma          1 (Dimensionless)
-  q              Scale_R^(13/2) / Scale_sigma * (c^9 * G^(-3) * M^(-2))
+### Units for Input/Output Variables
 
-  Note: 'eA' is a temporary auxiliary variable.
+| Variable | Unit |
+| :--- | :--- |
+| **U** | $R_{scale} \cdot c$ |
+| **R** | $R_s$ |
+| **rho** | $\rho_s / 18.7$ |
+| **epsilon** | $R_{scale} \cdot c^2$ |
+| **P** | $(\rho_s / 18.7) \cdot R_{Scale} \cdot c^2$ |
+| **w** | 1 (Dimensionless) |
+| **e^phi** | 1 (Dimensionless) |
+| **m** | $M$ (Halo Mass) |
+| **Gamma** | 1 (Dimensionless) |
+| **q** | $R_{scale}^{13/2} / \sigma_{scale} \cdot (c^9 G^{-3} M^{-2})$ |
+
+> **Note:** `eA` is a temporary auxiliary variable.
