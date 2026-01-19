@@ -4,13 +4,13 @@ dt_t0 = 1e-4
 N = 1001    
 # Number of spatial grid points.
 
-total_steps = 1000000   
+total_steps = 1000000 
 # Total number of time steps to simulate.
 
 save_interval = 10000    
 # Interval (in steps) for saving output data and updating the live plot.
 
-freeze_radius = 999    
+freeze_radius = 30    
 # Radii (in units of Rs) beyond this value are frozen. Typically set larger than the simulation boundary.
 
 FLAG_HSE = False    

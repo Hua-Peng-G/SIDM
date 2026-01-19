@@ -120,8 +120,8 @@ def evolve_kernel_unified(
         dphidA_arr = np.zeros(N_face, dtype=np.float64)
         phit_new_arr = np.zeros(N_face, dtype=np.float64)
         
-        max_hse_iter = 250
-        rel_tol = 1e-7
+        max_hse_iter = 100
+        rel_tol = 1e-6
         pseudo_time_factor = 0.5 
 
         for k in range(max_hse_iter):
