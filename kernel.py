@@ -1,351 +1,337 @@
+# -*- coding: utf-8 -*-
 import numpy as np
 from numba import njit
 
-# --- 1. Helper functions ---
+# --- 1. Low-level auxiliary functions ---
+
+# Calculate cell-centered coordinates
 @njit(cache=True)
-def avg_c2f(v):
-    N = len(v) + 1
-    out = np.empty(N, dtype=np.float64)
-    out[1:-1] = 0.5 * (v[:-1] + v[1:])
-    out[0] = v[0]; out[-1] = v[-1]
+def calc_Ac(A):
+    return 0.5 * (A[:-1] + A[1:])
+
+# Non-uniform grid averaging: cell-centered to face-centered
+@njit(cache=True)
+def avg_c2f_non(v_cell, A):
+    N_face = len(A)
+    out = np.zeros(N_face, dtype=np.float64)
+    out[0] = v_cell[0]
+    out[-1] = v_cell[-1]
+    Ac = calc_Ac(A)
+    for i in range(1, N_face - 1):
+        d_left = A[i] - Ac[i-1]
+        d_right = Ac[i] - A[i]
+        out[i] = (v_cell[i-1] * d_right + v_cell[i] * d_left) / max(d_left + d_right, 1e-180)
     return out
 
+# Non-uniform grid averaging: face-centered to cell-centered
 @njit(cache=True)
-def avg_f2c(v):
-    return 0.5 * (v[:-1] + v[1:])
+def avg_f2c_non(v_face, A):
+    N_cell = len(A) - 1
+    out = np.zeros(N_cell, dtype=np.float64)
+    Ac = calc_Ac(A)
+    for j in range(N_cell):
+        d_left = Ac[j] - A[j]
+        d_right = A[j+1] - Ac[j]
+        out[j] = (v_face[j] * d_right + v_face[j+1] * d_left) / max(d_left + d_right, 1e-180)
+    return out
 
+# Non-uniform grid derivative: cell-centered to face-centered
 @njit(cache=True)
-def deriv_c2f(v_cell, coords_A):
-    dV = v_cell[1:] - v_cell[:-1]
-    dA = 0.5 * (coords_A[2:] - coords_A[:-2])
-    N_face = len(v_cell) + 1
+def deriv_c2f_non(v_cell, A):
+    N_face = len(A)
     grad = np.zeros(N_face, dtype=np.float64)
-    grad[1:-1] = dV / dA
-    grad[0] = grad[1]; grad[-1] = grad[-2]
+    Ac = calc_Ac(A)
+    for i in range(1, N_face - 1):
+        grad[i] = (v_cell[i] - v_cell[i-1]) / max(Ac[i] - Ac[i-1], 1e-180)
+    grad[0] = grad[1]
+    grad[-1] = grad[-2]
     return grad
 
+# Non-uniform grid derivative: face-centered to cell-centered
 @njit(cache=True)
-def deriv_f2c(v_face, coords_A):
-    dA = coords_A[1:] - coords_A[:-1] 
-    dV = v_face[1:] - v_face[:-1]      
-    return dV / dA
-
-@njit(cache=True)
-def compute_current_P_fac(Ut, Rt, rhot, ept, R0_scale, a, sigma):
-    N_cell = len(rhot) - 1
-    P_fac_out = np.zeros(len(rhot), dtype=np.float64)
+def deriv_f2c_non(v_face, A):
+    N_cell = len(A) - 1
+    grad = np.zeros(N_cell, dtype=np.float64)
     for j in range(N_cell):
-        u_val = np.abs(Ut[j+1])
-        if u_val < 1e-99:
-            P_fac = 1.0
-        else:
-            tsc = (Rt[j+1] * R0_scale) / (u_val / R0_scale)
-            tr_denom = a * sigma * (rhot[j]/R0_scale**3) * np.sqrt(ept[j]/1.5/R0_scale)
-            if tr_denom < 1e-99: P_fac = 0.0
-            else:
-                tr = 1.0 / tr_denom
-                P_fac = 1.0 / (tr/tsc + 1.0)
-        P_fac_out[j] = P_fac
-    P_fac_out[-1] = 2*P_fac_out[-2] - P_fac_out[-3]
-    return P_fac_out
+        grad[j] = (v_face[j+1] - v_face[j]) / max(A[j+1] - A[j], 1e-180)
+    return grad
+
 
 # --- 2. Core evolution kernel ---
 @njit(cache=True)
 def evolve_kernel_unified(
     Ut, Rt, rhot, ept, Pt, wt, ephit, mt, Gammat, eA, qt,
     A, dt, Cq_viscosity, 
-    R0_scale, sigma, fq, a, b, gm, ephib,
+    R0_scale, sigma, fq, a, b, gm, ephib, w,
     freeze_radius,
-    flag_hse, flag_P_fac, flag_heat,
-    val_C 
+    flag_hse, flag_heat,
+    flag_bh_formed, idx_bh_arr, eps_exc,
+    flag_damp, damp_coeff,
+    flag_smooth_cell,
+    v_limit_factor
 ):
-    coeff_sigma = sigma / (R0_scale**1.5)
     N_face = len(Ut)
     N_cell = N_face - 1
+    max_hse_iter, rel_tol, pseudo_time_factor = 1000, 1e-5, 0.5
     
-    # === A. Determine calculation region ===
+    v_dep_const = (2.0 / (3.0 * R0_scale)) * ((3e5/w)**2)
+    
+    rhot_cell = rhot[:-1]
+    ept_cell = ept[:-1]
+    Pt_cell = Pt[:-1]
+
+    Rt_iter = Rt.copy()
+    Gammat_iter = Gammat.copy()
+    ephit_iter = ephit.copy()
+    rhot_iter = rhot_cell.copy()
+    ept_iter = ept_cell.copy()
+    Pt_iter = Pt_cell.copy()
+    wt_iter = wt[:-1].copy()
+    
+    qt_new = np.zeros(N_face, dtype=np.float64)
+    delta_e_rad = np.zeros(N_cell, dtype=np.float64)
+    dphidA_arr = np.zeros(N_face, dtype=np.float64)
+    phit_new_arr = np.zeros(N_face, dtype=np.float64)
+
+    # Determine boundary based on freeze_radius
+    idx_bh = idx_bh_arr[0] if flag_bh_formed else 0
     limit_idx = N_face
     for i in range(N_face):
         if Rt[i] > freeze_radius:
             limit_idx = i
             break
-    idx_end = limit_idx
-    if idx_end < 5: idx_end = 5
-    if idx_end > N_face: idx_end = N_face
+    idx_end = max(5, min(limit_idx, N_face))
     cell_end = min(N_cell, idx_end)
+    cell_start = idx_bh if flag_bh_formed else 0
+    loop_start = max(1, idx_bh + 1) if flag_bh_formed else 1
 
-    # === B. Pre-calculate radiative heat flux ===
-    rhot_cell = rhot[:-1]
-    Pt_cell = Pt[:-1]
-    ept_cell = ept[:-1] 
-    
-    qt_new = np.zeros(N_face, dtype=np.float64)
-    delta_e_rad = np.zeros(N_cell, dtype=np.float64)
-    
-    if flag_heat:
-        rhot_face_avg = avg_c2f(rhot_cell)
-        ephit_cell_avg = avg_f2c(ephit)
-        eeda = ept_cell * ephit_cell_avg
-        deeda = deriv_c2f(eeda, A)
-        deeda[0] = deeda[1]
-        
-        ep_face = avg_c2f(ept_cell)
-        Pt_face = avg_c2f(Pt_cell)
-        Vt_face = avg_c2f(1.0/rhot_cell)
-        
-        calc_end = min(N_face, idx_end + 1)
-        for i in range(1, calc_end):
-            denom = (1.0/val_C + a/b * sigma**2 / 4 / np.pi / R0_scale**4 * Pt_face[i])
-            qt_new[i] = fq * np.sqrt(ep_face[i]) * Pt_face[i] / Vt_face[i] * Rt[i]**2 / ephit[i] * deeda[i] / denom
-        
-        Q_face = np.zeros(N_face, dtype=np.float64)
-        for i in range(calc_end):
-            Q_face[i] = 4 * np.pi * Rt[i]**2 * qt_new[i] * ephit[i]**2
-        d4q_cell = deriv_f2c(Q_face, A)
-        
-        for j in range(cell_end):
-            loss_rate = d4q_cell[j] / (R0_scale**3.5) * sigma / ephit_cell_avg[j]
-            delta_e_rad[j] = -1.0 * loss_rate * dt
-
-    # === C. Evolution branch selection ===
     if flag_hse:
-        # --- HSE Branch ---
-        Rt_iter = Rt.copy()
-        Gammat_iter = Gammat.copy()
-        ephit_iter = ephit.copy()
-        rhot_iter = np.zeros(N_cell, dtype=np.float64)
-        Pt_iter = np.zeros(N_cell, dtype=np.float64)
-        wt_iter = np.zeros(N_cell, dtype=np.float64)
-        ept_iter = ept_cell.copy()
-        dphidA_arr = np.zeros(N_face, dtype=np.float64)
-        phit_new_arr = np.zeros(N_face, dtype=np.float64)
+        # =========================================================
+        # HSE (Hydrostatic Equilibrium) branch
+        # =========================================================
+        c_sigma_arr = np.zeros(N_cell, dtype=np.float64)
+        for j in range(N_cell):
+            c_sigma_arr[j] = 1.0 / (1.0 + v_dep_const * ept_cell[j])**2
+        c_sigma_f = avg_c2f_non(c_sigma_arr, A)
         
-        max_hse_iter = 100
-        rel_tol = 1e-6
-        pseudo_time_factor = 0.5 
-
         for k in range(max_hse_iter):
-            for i in range(1, idx_end):
+            for i in range(loop_start, idx_end):
                 val = 1.0 - 2.0 * mt[i] / (Rt_iter[i] * R0_scale)
-                if val < 1e-9: val = 1e-9
                 Gammat_iter[i] = np.sqrt(val)
-            Gam_cell = avg_f2c(Gammat_iter)
+            Gam_cell = avg_f2c_non(Gammat_iter, A)
 
-            for j in range(cell_end):
+            # Starting point for density calculation
+            j_start = cell_start if not flag_bh_formed else cell_start + 1
+            for j in range(j_start, cell_end):
                 dVol = (4.0/3.0) * np.pi * (Rt_iter[j+1]**3 - Rt_iter[j]**3)
-                if dVol < 1e-150: dVol = 1e-150
-                dM = Gam_cell[j] * (A[j+1] - A[j])
-                if dM < 1e-150: dM = 1e-150
-                rhot_iter[j] = 1.0 / (dVol / dM)
+                rhot_iter[j] = (Gam_cell[j] * (A[j+1] - A[j])) / dVol
+            if flag_bh_formed:
+                rhot_iter[cell_start] = rhot_iter[cell_start + 1]
 
-            for j in range(cell_end):
+            if flag_heat and cell_end > cell_start:
+                ephit_c_avg = avg_f2c_non(ephit_iter, A)
+                ep_f = avg_c2f_non(ept_iter, A)
+                Pt_f = avg_c2f_non(Pt_iter, A)
+                Vt_f = avg_c2f_non(1.0/rhot_iter, A)
+                deeda = deriv_c2f_non(ept_iter * ephit_c_avg, A)
+                
+                for i in range(loop_start, min(N_face, idx_end + 1)):
+                    denom_rad = (4.0/3.0 + a/b * (sigma * c_sigma_f[i])**2 / (4 * np.pi * R0_scale**4) * Pt_f[i])
+                    qt_new[i] = fq * Gammat_iter[i] * np.sqrt(ep_f[i]) * Pt_f[i] / Vt_f[i] * Rt_iter[i]**2 / ephit_iter[i] * deeda[i] / denom_rad
+                
+                Q_f = np.zeros(N_face, dtype=np.float64)
+                for i in range(idx_bh, min(N_face, idx_end + 1)):
+                    Q_f[i] = 4 * np.pi * Rt_iter[i]**2 * qt_new[i] * ephit_iter[i]**2
+                d4q = deriv_f2c_non(Q_f, A)
+                for j in range(cell_start, cell_end):
+                    delta_e_rad[j] = -1.0 * (d4q[j] / (R0_scale**3.5) * (sigma * c_sigma_arr[j]) / ephit_c_avg[j]) * dt
+
+            # Starting point for energy update
+            for j in range(j_start, cell_end):
                 vol_old = 1.0 / rhot_cell[j]
                 vol_new = 1.0 / rhot_iter[j]
                 dV = vol_new - vol_old
-                P_old = Pt_cell[j]
-                
-                denom_factor = 1.0 + 0.5 * (gm - 1.0) * rhot_iter[j] * dV
-                numerator = ept_cell[j] + delta_e_rad[j] - 0.5 * P_old * dV
-                
-                if denom_factor < 1e-5: denom_factor = 1e-5
-                e_val = numerator / denom_factor
-                if e_val < 1e-10: e_val = 1e-10
-                ept_iter[j] = e_val
+                denom_fac = 1.0 + 0.5 * (gm - 1.0) * rhot_iter[j] * dV
+                ept_iter[j] = (ept_cell[j] + delta_e_rad[j] - 0.5 * Pt_cell[j] * dV) / denom_fac
                 Pt_iter[j] = (gm - 1.0) * ept_iter[j] * rhot_iter[j]
                 wt_iter[j] = 1.0 + (ept_iter[j] + Pt_iter[j]/rhot_iter[j]) / R0_scale
+            if flag_bh_formed:
+                ept_iter[cell_start], Pt_iter[cell_start], wt_iter[cell_start] = ept_iter[cell_start+1], Pt_iter[cell_start+1], wt_iter[cell_start+1]
 
-            Pt_face_iter = avg_c2f(Pt_iter)
-            rhot_face_iter = avg_c2f(rhot_iter)
-            wt_face_iter = avg_c2f(wt_iter)
-            dPdA_iter = deriv_c2f(Pt_iter, A)
-            
-            eA_iter = np.zeros(N_face, dtype=np.float64)
-            for i in range(1, idx_end):
-                 denom = Rt_iter[i]**2 * rhot_face_iter[i]**2
-                 if denom > 1e-150:
-                     eA_iter[i] = qt_new[i] / (4 * np.pi * denom)
-            
-            dphidA_arr[:] = 0.0 
-            for i in range(idx_end):
-                if np.abs(wt_face_iter[i]) > 1e-99:
-                    term_rad_iter = 0
-                    bracket = dPdA_iter[i] / rhot_face_iter[i] + term_rad_iter
-                    dphidA_arr[i] = (-1.0 / wt_face_iter[i]) * bracket
+            dPdA_h = deriv_c2f_non(Pt_iter, A)
+            wt_f_h = avg_c2f_non(wt_iter, A)
+            rf_f_h = avg_c2f_non(rhot_iter, A)
+            for i in range(loop_start, idx_end):
+                dphidA_arr[i] = (-1.0 / wt_f_h[i]) * (dPdA_h[i] / rf_f_h[i])
             
             phit_new_arr[-1] = np.log(ephib) * R0_scale
-            for i in range(N_face - 2, -1, -1):
-                 dA_val = A[i+1] - A[i]
-                 val = phit_new_arr[i+1] - 0.5 * (dphidA_arr[i] + dphidA_arr[i+1]) * dA_val
-                 phit_new_arr[i] = val
-            for i in range(N_face):
-                 ephit_iter[i] = np.exp(phit_new_arr[i] / R0_scale)
+            for i in range(N_face - 2, max(-1, idx_bh - 1), -1):
+                phit_new_arr[i] = phit_new_arr[i+1] - 0.5 * (dphidA_arr[i] + dphidA_arr[i+1]) * (A[i+1] - A[i])
+            for i in range(N_face): 
+                ephit_iter[i] = np.exp(phit_new_arr[i] / R0_scale)
 
             max_rel_change = 0.0
-            delta_R = np.zeros(N_face, dtype=np.float64)
-            for i in range(1, idx_end): 
-                dphidA_val = dphidA_arr[i]
-                term1 = -1.0 * Gammat_iter[i]**2 * dphidA_val * 4 * np.pi * Rt_iter[i]**2 * rhot_face_iter[i] / ephit_iter[i]
-                term2 = mt[i] / (Rt_iter[i]**2)
-                term3 = 4 * np.pi * Pt_face_iter[i] * Rt_iter[i] / R0_scale
-                
-                acc_val = (-1.0 * ephit_iter[i] * (term1 + term2 + term3)) / R0_scale
-                if mt[i] < 1e-150: t_dyn_sq = 1.0
-                else: t_dyn_sq = Rt_iter[i]**3 / mt[i]
-                
-                step_val = pseudo_time_factor * t_dyn_sq * acc_val
-                limit_frac = 0.1 
-                max_step = limit_frac * Rt_iter[i]
-                if step_val > max_step: step_val = max_step
-                if step_val < -max_step: step_val = -max_step
-                delta_R[i] = step_val
-                
-                curr_R = Rt_iter[i] if Rt_iter[i] > 1e-150 else 1e-150
-                rel_change = np.abs(step_val) / curr_R
-                if rel_change > max_rel_change: max_rel_change = rel_change
-            
-            for i in range(1, idx_end):
-                Rt_iter[i] += delta_R[i]
-                if Rt_iter[i] <= Rt_iter[i-1]:
-                    Rt_iter[i] = Rt_iter[i-1] + (Rt_iter[i+1] - Rt_iter[i-1]) * 0.1 
+            rf_f_it = avg_c2f_non(rhot_iter, A)
+            Pt_f_it = avg_c2f_non(Pt_iter, A)
+            if k < 5: current_factor = 1 
+            elif k < 15: current_factor = 0.5
+            else: current_factor = 0.1
 
-            if max_rel_change < rel_tol:
-                break
-        
-        for i in range(1, idx_end):
-            Rt[i] = Rt_iter[i]
-            Gammat[i] = Gammat_iter[i]
-        for i in range(N_face):
-            ephit[i] = ephit_iter[i] 
-            Ut[i] = 0.0 
+            for i in range(loop_start, idx_end): 
+                term1 = -1.0 * Gammat_iter[i]**2 * dphidA_arr[i] * 4 * np.pi * Rt_iter[i]**2 * rf_f_it[i] / ephit_iter[i]
+                term2 = mt[i] / (Rt_iter[i]**2)
+                term3 = 4 * np.pi * Pt_f_it[i] * Rt_iter[i] / R0_scale
+                acc_val = (-1.0 * ephit_iter[i] * (term1 + term2 + term3)) / R0_scale
+                t_dyn_sq = 1.0 if mt[i] == 0.0 else Rt_iter[i]**3 / mt[i]
+                step_val = current_factor * t_dyn_sq * acc_val
+                limit = 0.2 * (Rt_iter[i] - Rt_iter[i-1]) if i > 0 else 0.2 * Rt_iter[i]
+                step_val = max(-limit, min(limit, step_val))
+                Rt_iter[i] += step_val
+                if i > 0 and Rt_iter[i] <= Rt_iter[i-1]: Rt_iter[i] = Rt_iter[i-1] * (1.0 + 1e-12)
+                rel = np.abs(step_val) / Rt_iter[i]
+                if rel > max_rel_change: max_rel_change = rel
+
+            # Synchronous excision of the black hole horizon in HSE mode
+            if flag_bh_formed:
+                while idx_bh < N_face - 2:
+                    val_g_hse = 1.0 - 2.0 * mt[idx_bh+1] / (Rt_iter[idx_bh+1] * R0_scale)
+                    if Rt_iter[idx_bh+1] <= 2.0 * mt[idx_bh+1] / R0_scale * (1.0 + eps_exc) or val_g_hse < 1e-8:
+                        idx_bh += 1
+                        idx_bh_arr[0], Rt_iter[idx_bh] = idx_bh, Rt[idx_bh]
+                        loop_start, cell_start = idx_bh + 1, idx_bh
+                    else: break
+
+            if max_rel_change < rel_tol: break
+
+        for i in range(idx_end):
+            Rt[i], Gammat[i], ephit[i], Ut[i] = Rt_iter[i], Gammat_iter[i], ephit_iter[i], 0.0
         for j in range(cell_end):
-            rhot[j] = rhot_iter[j]
-            ept[j] = ept_iter[j] 
-            Pt[j] = Pt_iter[j]
-            wt[j] = wt_iter[j]
+            rhot[j], ept[j], Pt[j], wt[j] = rhot_iter[j], ept_iter[j], Pt_iter[j], wt_iter[j]
 
     else:
-        # --- Dynamic Branch ---
-        rhot_face_avg = avg_c2f(rhot_cell)
-        Pt_face_avg = avg_c2f(Pt_cell)
-        wt_face_avg = avg_c2f(wt)
-        dPdA = deriv_c2f(Pt_cell, A)
+        # =========================================================
+        # Dynamic branch
+        # =========================================================
+        c_sigma_arr = np.zeros(N_cell, dtype=np.float64)
+        for j in range(N_cell):
+            c_sigma_arr[j] = 1.0 / (1.0 + v_dep_const * ept_cell[j])**2
+        c_sigma_f = avg_c2f_non(c_sigma_arr, A)
+        
+        rhot_face_avg, P_tot_face_avg = avg_c2f_non(rhot_cell, A), avg_c2f_non(Pt_cell, A)
+        dPdA_tot, wt_face_avg = deriv_c2f_non(Pt_cell, A), avg_c2f_non(wt, A)
         dUdt = np.zeros(N_face, dtype=np.float64)
-        loop_start_acc = max(1, 0) 
 
-        for i in range(loop_start_acc, idx_end):
+        if flag_heat:
+            ephit_c_avg = avg_f2c_non(ephit, A)
+            ep_f, Pt_f = avg_c2f_non(ept_cell, A), avg_c2f_non(Pt_cell, A)
+            Vt_f = avg_c2f_non(1.0/rhot_cell, A)
+            deeda = deriv_c2f_non(ept_cell * ephit_c_avg, A)
+            for i in range(loop_start, min(N_face, idx_end + 1)):
+                denom_r = (4.0/3.0 + a/b * (sigma * c_sigma_f[i])**2 / (4 * np.pi * R0_scale**4) * Pt_f[i])
+                qt_new[i] = fq * np.sqrt(ep_f[i]) * Pt_f[i] / Vt_f[i] * Rt[i]**2 / ephit[i] * deeda[i] / denom_r
+            Q_f = np.zeros(N_face, dtype=np.float64)
+            for i in range(idx_bh, min(N_face, idx_end + 1)): Q_f[i] = 4 * np.pi * Rt[i]**2 * qt_new[i] * ephit[i]**2
+            d4q = deriv_f2c_non(Q_f, A)
+            for j in range(cell_start, cell_end):
+                delta_e_rad[j] = -1.0 * (d4q[j] / (R0_scale**3.5) * (sigma * c_sigma_arr[j]) / ephit_c_avg[j]) * dt
+
+        for i in range(loop_start, idx_end):
             denom_eA = Rt[i]**2 * rhot_face_avg[i]**2
-            if denom_eA < 1e-150: denom_eA = 1e-150
             eA_term = qt_new[i] / (4 * np.pi * denom_eA) 
-            term_rad = coeff_sigma / ephit[i] * (eA_term - eA[i]) / dt
-            bracket = dPdA[i] / rhot_face_avg[i] + term_rad
-            dphidA_val = (-1.0 / wt_face_avg[i]) * bracket
-            term1 = -1.0 * Gammat[i]**2 * dphidA_val * 4 * np.pi * Rt[i]**2 * rhot_face_avg[i] / ephit[i]
-            term2 = mt[i] / (Rt[i]**2)
-            term3 = 4 * np.pi * Pt_face_avg[i] * Rt[i] / R0_scale
-            dUdt[i] = (-1.0 * ephit[i] * (term1 + term2 + term3)) / R0_scale
+            term_rad = ((sigma * c_sigma_f[i]) / (R0_scale**1.5)) / ephit[i] * (eA_term - eA[i]) / dt
+            dphidA_val = (-1.0 / wt_face_avg[i]) * (dPdA_tot[i] / rhot_face_avg[i] + term_rad)
+            dUdt[i] = (-1.0 * ephit[i] * (-1.0 * Gammat[i]**2 * dphidA_val * 4 * np.pi * Rt[i]**2 * rhot_face_avg[i] / ephit[i] + mt[i] / (Rt[i]**2) + 4 * np.pi * P_tot_face_avg[i] * Rt[i] / R0_scale)) / R0_scale
+            if flag_damp: dUdt[i] -= damp_coeff * Ut[i]
+                
+        Ut_new, Rt_new = Ut.copy(), Rt.copy()
+        for i in range(loop_start, idx_end): Ut_new[i] = Ut[i] + dUdt[i] * dt
 
-        Ut_new = Ut.copy()
-        Rt_new = Rt.copy()
-        for i in range(loop_start_acc, idx_end):
-            Ut_new[i] = Ut[i] + dUdt[i] * dt
-            
-        # Outer boundary treatment
+        Gammat_new = Gammat.copy()
+        for i in range(loop_start, idx_end):
+            val_g = 1.0 + (Ut_new[i]/R0_scale)**2 - 2 * mt[i] / (Rt_new[i] * R0_scale)
+            Gammat_new[i] = np.sqrt(val_g)
+
+        if flag_bh_formed:
+            while idx_bh < N_face - 2:
+                if Rt_new[idx_bh+1] <= 2.0 * mt[idx_bh+1] / R0_scale * (1.0 + eps_exc) or Gammat_new[idx_bh+1] < 1e-4:
+                    idx_bh += 1
+                    idx_bh_arr[0], Ut_new[idx_bh], Rt_new[idx_bh] = idx_bh, 0.0, Rt[idx_bh]
+                    loop_start, cell_start = idx_bh + 1, idx_bh
+                else: break
+
         if idx_end == N_face:
-            boundary_width = 20 
-            start_smooth = N_face - boundary_width
-            if start_smooth < loop_start_acc: start_smooth = loop_start_acc
+            start_smooth = max(loop_start, N_face - 5)
             for _ in range(2): 
                 temp_last = Ut_new[start_smooth-1]
                 for i in range(start_smooth, N_face - 1):
                     val_smooth = 0.25 * temp_last + 0.5 * Ut_new[i] + 0.25 * Ut_new[i+1]
-                    temp_last = Ut_new[i] 
-                    Ut_new[i] = val_smooth
+                    temp_last, Ut_new[i] = Ut_new[i], val_smooth
             extrap_val = 2.0 * Ut_new[-2] - Ut_new[-3]
-            if extrap_val > Ut_new[-2]: Ut_new[-1] = Ut_new[-2]
-            else: Ut_new[-1] = extrap_val
-        
-        for i in range(loop_start_acc, idx_end):
-             Rt_new[i] = Rt[i] + ephit[i] * Ut_new[i] * dt / (R0_scale**2)
-        
-        Gammat_new = Gammat.copy()
-        for i in range(1, idx_end):
-            val = 1.0 + (Ut_new[i]/R0_scale)**2 - 2 * mt[i] / (Rt_new[i] * R0_scale)
-            if val < 0: val = 0
-            Gammat_new[i] = np.sqrt(val)
-        Gam_cell = avg_f2c(Gammat_new)
+            Ut_new[-1] = min(extrap_val, Ut_new[-2]) if extrap_val > Ut_new[-2] else extrap_val
 
-        rhot_new = rhot.copy()
-        ept_new = ept.copy()
-        Pt_new = Pt.copy()
-        wt_new = wt.copy()
+        cs_f_d = avg_c2f_non(np.sqrt(gm * Pt_cell / rhot_cell), A)
+        for i in range(loop_start, idx_end):
+            v_lim = v_limit_factor * cs_f_d[i]
+            Ut_new[i] = max(-v_lim, min(v_lim, Ut_new[i]))
+            Rt_new[i] = Rt[i] + ephit[i] * Ut_new[i] * dt / (R0_scale**2)
 
-        for j in range(cell_end):
+        Gam_cell_d = avg_f2c_non(Gammat_new, A)
+        rhot_new, ept_new, Pt_new, wt_new = rhot.copy(), ept.copy(), Pt.copy(), wt.copy()
+        
+        # Fix for density and energy update skipping Cell 0
+        j_start_dyn = cell_start if not flag_bh_formed else cell_start + 1
+        for j in range(j_start_dyn, cell_end):
             dVol = (4.0/3.0) * np.pi * (Rt_new[j+1]**3 - Rt_new[j]**3)
-            dM = Gam_cell[j] * (A[j+1] - A[j])
-            if dM < 1e-150: dM = 1e-150
-            rhot_new[j] = 1.0 / (dVol / dM)
+            rhot_new[j] = 1.0 / (dVol / (Gam_cell_d[j] * (A[j+1] - A[j])))
             
-            vol_old = 1.0 / rhot[j]
-            vol_new = 1.0 / rhot_new[j]
-            dV = vol_new - vol_old
-            P_old = Pt[j]
-            denom_factor = 1.0 + 0.5 * (gm - 1.0) * rhot_new[j] * dV
-            numerator = ept[j] + delta_e_rad[j] - 0.5 * P_old * dV
-            if denom_factor < 1e-5: denom_factor = 1e-5
-            e_val = numerator / denom_factor
-            if e_val < 1e-10: e_val = 1e-10
-            ept_new[j] = e_val
+            dv = 1.0/rhot_new[j] - 1.0/rhot[j]
+            den = 1.0 + 0.5 * (gm - 1.0) * rhot_new[j] * dv
+            ept_new[j] = (ept[j] + delta_e_rad[j] - 0.5 * Pt[j] * dv) / den
             
-            P_fac = 1.0
-            if flag_P_fac:
-                u_val = np.abs(Ut_new[j+1]) 
-                if u_val < 1e-99: P_fac = 1.0
-                else:
-                    tsc = (Rt_new[j+1] * R0_scale) / (u_val / R0_scale)
-                    tr_denom = a * sigma * (rhot_new[j]/R0_scale**3) * np.sqrt(ept_new[j]/1.5/R0_scale)
-                    if tr_denom < 1e-99: P_fac = 0.0 
-                    else:
-                        tr = 1.0 / tr_denom
-                        P_fac = 1.0 / (tr/tsc + 1.0)
-            
-            Pt_new[j] = (gm - 1.0) * ept_new[j] * rhot_new[j] * P_fac
+            Pt_new[j] = (gm - 1.0) * ept_new[j] * rhot_new[j]
             wt_new[j] = 1.0 + (ept_new[j] + Pt_new[j]/rhot_new[j]) / R0_scale
 
-        for i in range(idx_end):
-            Ut[i] = Ut_new[i]
-            Rt[i] = Rt_new[i]
-            Gammat[i] = Gammat_new[i]
-        for j in range(cell_end):
-            rhot[j] = rhot_new[j]
-            ept[j] = ept_new[j]
-            Pt[j] = Pt_new[j]
-            wt[j] = wt_new[j]
-            
-    # === D. Finalize ===
-    for i in range(idx_end):
+        if flag_bh_formed:
+            target_j = cell_start 
+            neighbor_j = cell_start + 1
+            rhot_new[target_j] = rhot_new[neighbor_j]
+            ept_new[target_j]  = ept_new[neighbor_j]
+            Pt_new[target_j]   = Pt_new[neighbor_j]
+            wt_new[target_j]   = wt_new[neighbor_j]
+
+        for i in range(loop_start, idx_end): Ut[i], Rt[i], Gammat[i] = Ut_new[i], Rt_new[i], Gammat_new[i]
+        for j in range(idx_bh, cell_end): rhot[j], ept[j], Pt[j], wt[j] = rhot_new[j], ept_new[j], Pt_new[j], wt_new[j]
+
+    # === D. General finalization ===
+    rf_end = avg_c2f_non(rhot[:-1], A)
+    for i in range(idx_bh, idx_end):
         qt[i] = qt_new[i]
-        denom = Rt[i]**2 * avg_c2f(rhot)[i]**2
-        if denom > 1e-150:
-            eA[i] = qt[i] / (4 * np.pi * denom)
-
+        den_eA = Rt[i]**2 * rf_end[i]**2
+        if den_eA > 0: eA[i] = qt[i] / (4*np.pi*den_eA)
+        
     if idx_end == N_face:
-         rhot[-1] = rhot[-2]
-         Pt[-1] = Pt[-2]
-         ept[-1] = ept[-2]
-         wt[-1] = wt[-2]
+        rhot[-1], Pt[-1], ept[-1], wt[-1] = rhot[-2], Pt[-2], ept[-2], wt[-2]
 
-# --- 3. Driver ---
+# --- 3. Simulation driver ---
 @njit(cache=True)
 def run_simulation_chunk_numba(
     Ut, Rt, rhot, ept, Pt, wt, ephit, mt, Gammat, eA, qt,
-    A, dt, Cq_viscosity, R0_scale, sigma, fq, a, b, gm, ephib,
-    chunk_steps, sub_steps,
-    freeze_radius, flag_hse, flag_P_fac, flag_heat, val_C
+    A, dt, Cq_viscosity, R0_scale, sigma, fq, a, b, gm, ephib, w,
+    chunk_steps, split_index, sub_steps,
+    freeze_radius, flag_hse, flag_heat,
+    flag_bh_formed, idx_bh_arr, eps_exc,
+    flag_damp, damp_coeff,
+    flag_smooth_cell,
+    v_limit_factor
 ):
     for step in range(chunk_steps):
         for _ in range(sub_steps):
             evolve_kernel_unified(
                 Ut, Rt, rhot, ept, Pt, wt, ephit, mt, Gammat, eA, qt,
-                A, dt, Cq_viscosity, R0_scale, sigma, fq, a, b, gm, ephib,
-                freeze_radius, flag_hse, flag_P_fac, flag_heat, val_C
+                A, dt, Cq_viscosity, R0_scale, sigma, fq, a, b, gm, ephib, w,
+                freeze_radius, flag_hse, flag_heat,
+                flag_bh_formed, idx_bh_arr, eps_exc,
+                flag_damp, damp_coeff,
+                flag_smooth_cell,
+                v_limit_factor
             )

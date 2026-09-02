@@ -1,38 +1,52 @@
-dt_t0 = 1e-4    
+dt_t0 = 3e-6    
 # Time step in units of t0. CAUTION: Large values may cause numerical instability.
-
-N = 1001    
+N = 251    
 # Number of spatial grid points.
-
-total_steps = 1000000 
+total_steps = 2e7 
 # Total number of time steps to simulate.
-
-save_interval = 10000    
+save_interval = 4e5    
 # Interval (in steps) for saving output data and updating the live plot.
-
 freeze_radius = 999    
-# Radii (in units of Rs) beyond this value are frozen. Typically set larger than the simulation boundary.
+# Radii (in units of Rs) beyond this value are frozen.
+# Typically set larger than the simulation boundary.
 
 FLAG_HSE = False    
-# Enable hydrostatic equilibrium (quasi-static) approximation. Default: False.
+# Enable hydrostatic equilibrium (quasi-static) approximation.
+# Default: False.
 
 FLAG_P_FAC = False    
 # Enable pressure modification factor. Default: False.
-
 FLAG_HEAT = True    
-# Enable heat conduction. To relax a non-equilibrium initial state (if needed), disable this flag and evolve the system for a while. Default: True.
-
+# Enable heat conduction.
+# To relax a non-equilibrium initial state (if needed), disable this flag and evolve the system for a while. Default: True.
 ENABLE_PLOTTING = True    
 # Enable live plotting. Disable this to maximize simulation speed.
-
 plot_x = Rt    
 # Variable for the x-axis. Typically set to 'Rt' (radius).
-
 plot_y = rhot    
-# Variable for the y-axis. Options: rhot (density), ept (specific internal energy), qt (heat flux), etc.
+# Variable for the y-axis.
+# Options: rhot (density), ept (specific internal energy), qt (heat flux), etc.
 
 plot_log_y = True   
-# Use logarithmic scale for the y-axis. Valid only when y values are positive.
+# Use logarithmic scale for the y-axis.
+# Valid only when y values are positive.
 
 filename = output.npy    
 # Name of the output file.
+
+FLAG_BH_FORMED = False
+# Enable black hole formation simulation.
+EPS_EXC = 1.0
+# Epsilon for black hole excision region.
+INITIAL_BH_IDX = 0
+# Initial index for black hole boundary.
+FLAG_DAMP = False
+# Enable damping.
+DAMP_COEFF = 1e-7
+# Damping coefficient.
+P_FAC_RAMP = 1.0
+# Pressure factor ramp.
+FLAG_SM = False
+# Smooth cell flag.
+v_limit_factor = 10000.0
+# Velocity limit factor.
