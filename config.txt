@@ -35,11 +35,12 @@ filename = output.npy
 # Name of the output file.
 
 FLAG_BH_FORMED = False
-# Enable black hole formation simulation.
+# If ture, a BH is assumed to exist in the center, whose horizon is at the radius of the mass shell [INITIAL_BH_IDX]
 EPS_EXC = 1.0
-# Epsilon for black hole excision region.
+# Epsilon for black hole excision region. 
 INITIAL_BH_IDX = 0
-# Initial index for black hole boundary.
+# Mass shell index for black hole boundary.
+
 FLAG_DAMP = False
 # Enable damping.
 DAMP_COEFF = 1e-7
